@@ -1,6 +1,9 @@
 package com.midas.app.services;
 
+import com.midas.app.Util.AccountBuilder;
 import com.midas.app.models.Account;
+import com.midas.app.models.Enum.ProviderType;
+import com.midas.app.providers.external.stripe.StripeConfiguration;
 import com.midas.app.repositories.AccountRepository;
 import com.midas.app.workflows.CreateAccountWorkflow;
 import io.temporal.client.WorkflowClient;
@@ -16,9 +19,11 @@ import org.springframework.stereotype.Service;
 public class AccountServiceImpl implements AccountService {
   private final Logger logger = Workflow.getLogger(AccountServiceImpl.class);
 
-  private final WorkflowClient workflowClient;
-
   private final AccountRepository accountRepository;
+
+  private final StripeConfiguration stripeConfiguration;
+
+  private final WorkflowClient workflowClient;
 
   /**
    * createAccount creates a new account in the system or provider.
@@ -28,17 +33,45 @@ public class AccountServiceImpl implements AccountService {
    */
   @Override
   public Account createAccount(Account details) {
-    var options =
-        WorkflowOptions.newBuilder()
-            .setTaskQueue(CreateAccountWorkflow.QUEUE_NAME)
-            .setWorkflowId(details.getEmail())
+
+    String email = details.getEmail();
+    String firstName = details.getFirstName();
+    String lastName = details.getLastName();
+
+    String name = firstName + " " + lastName;
+
+    // Create a Stripe customer and retrieve the customer ID
+    String stripeCustomerId =
+        StripeCustomerFactory.createStripeCustomer(email, name, stripeConfiguration);
+
+    // Build the Account object
+    Account account =
+        new AccountBuilder()
+            .withEmail(email)
+            .withFirstName(firstName)
+            .withLastName(lastName)
+            .withProviderType(ProviderType.STRIPE)
+            .withProviderId(stripeCustomerId)
             .build();
 
-    logger.info("initiating workflow to create account for email: {}", details.getEmail());
+    // Save the account details
+    Account savedAccount = accountRepository.save(account);
 
-    var workflow = workflowClient.newWorkflowStub(CreateAccountWorkflow.class, options);
+    // Start the Temporal workflow to create the account asynchronously
+    initiateWorkflow(savedAccount);
 
-    return workflow.createAccount(details);
+    return savedAccount;
+  }
+
+  private void initiateWorkflow(Account account) {
+    // Build workflow options
+    WorkflowOptions options =
+        WorkflowOptions.newBuilder().setTaskQueue(CreateAccountWorkflow.QUEUE_NAME).build();
+
+    // Start the workflow
+    CreateAccountWorkflow workflow =
+        workflowClient.newWorkflowStub(CreateAccountWorkflow.class, options);
+    workflow.createAccount(account);
   }
 
   /**
